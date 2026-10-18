@@ -109,11 +109,11 @@ class TestJellyfinClient(unittest.TestCase):
         self.assertEqual(state["processed"]["item-123"]["completed_langs"], ["eng", "rum"])
 
     def test_pending_languages_calculation(self):
-        # Fresh item needs all configured languages
+        # Fresh item needs all configured languages (canonicalized to 3-letter)
         pending = jellyfin_client.get_item_pending_languages("item-fresh")
-        self.assertEqual(pending, list(config.SUBTITLE_LANGS))
+        self.assertEqual(pending, [jellyfin_client.normalize_to_3letter(l) for l in config.SUBTITLE_LANGS])
 
-        # Partially completed item
+        # Partially completed item with ISO-639-2 variant (rum -> ron)
         with patch.object(config, "SUBTITLE_LANGS", ["eng", "rum"]):
             jellyfin_client.mark_processed(
                 item_id="item-partial",
@@ -121,14 +121,14 @@ class TestJellyfinClient(unittest.TestCase):
                 completed_langs=["eng"],
             )
             pending_partial = jellyfin_client.get_item_pending_languages("item-partial")
-            self.assertEqual(pending_partial, ["rum"])
+            self.assertEqual(pending_partial, ["ron"])
             self.assertFalse(jellyfin_client.is_already_processed("item-partial"))
 
             # Fully completed item
             jellyfin_client.mark_processed(
                 item_id="item-partial",
                 status="success",
-                completed_langs=["rum"],
+                completed_langs=["ron"],
             )
             self.assertTrue(jellyfin_client.is_already_processed("item-partial"))
 
@@ -159,6 +159,53 @@ class TestJellyfinClient(unittest.TestCase):
         # Must tag .whisper in Language so Jellyfin formats it as 'whisper - English'
         self.assertEqual(payload["Language"], "eng.whisper")
         self.assertEqual(payload["Format"], "srt")
+
+    def test_language_normalization(self):
+        self.assertEqual(jellyfin_client.normalize_to_3letter("en"), "eng")
+        self.assertEqual(jellyfin_client.normalize_to_3letter("eng"), "eng")
+        self.assertEqual(jellyfin_client.normalize_to_3letter("ro"), "ron")
+        self.assertEqual(jellyfin_client.normalize_to_3letter("rum"), "ron")
+        self.assertEqual(jellyfin_client.normalize_to_3letter("ron"), "ron")
+        self.assertEqual(jellyfin_client.normalize_to_3letter("ja"), "jpn")
+        self.assertEqual(jellyfin_client.normalize_to_2letter("eng"), "en")
+        self.assertEqual(jellyfin_client.normalize_to_2letter("ron"), "ro")
+        self.assertEqual(jellyfin_client.normalize_to_2letter("rum"), "ro")
+
+
+class TestTranslator(unittest.TestCase):
+    def test_nllb_lang_mapping(self):
+        import translator
+        self.assertEqual(translator._LANG_TO_NLLB["eng"], "eng_Latn")
+        self.assertEqual(translator._LANG_TO_NLLB["en"], "eng_Latn")
+        self.assertEqual(translator._LANG_TO_NLLB["ron"], "ron_Latn")
+        self.assertEqual(translator._LANG_TO_NLLB["rum"], "ron_Latn")
+        self.assertEqual(translator._LANG_TO_NLLB["ro"], "ron_Latn")
+
+    def test_empty_srt_handling(self):
+        import translator
+        res = translator.translate_srt("", src_lang="eng", tgt_lang="ron")
+        self.assertTrue(res.success)
+        self.assertEqual(res.srt_text, "")
+
+    def test_same_language_bypass(self):
+        import translator
+        sample = "1\n00:00:01,000 --> 00:00:02,000\nHello\n"
+        res = translator.translate_srt(sample, src_lang="eng", tgt_lang="eng")
+        self.assertTrue(res.success)
+        self.assertEqual(res.srt_text, sample)
+
+    def test_srt_parsing_regex(self):
+        import translator
+        sample = (
+            "1\n00:00:01,000 --> 00:00:03,000\nLine one\n\n"
+            "2\n00:00:04,500 --> 00:00:07,000\nLine two with multiple\nwords\n"
+        )
+        matches = list(translator._SRT_BLOCK_REGEX.finditer(sample.strip()))
+        self.assertEqual(len(matches), 2)
+        self.assertEqual(matches[0].group(1), "1")
+        self.assertEqual(matches[0].group(3), "Line one")
+        self.assertEqual(matches[1].group(1), "2")
+        self.assertEqual(matches[1].group(3), "Line two with multiple\nwords")
 
 
 if __name__ == "__main__":

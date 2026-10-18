@@ -38,10 +38,12 @@ If you touch your mouse or start gaming, the worker **aborts within seconds** an
 
 - **True Idle-Sensing**: Monitors Win32 user input (`GetLastInputInfo`) and GPU utilization (`nvidia-smi`). Only works when you aren't using the PC.
 - **Instant Abort & VRAM Cleanup**: If you move your mouse or launch a game, extraction and transcription abort within seconds, deleting temp files and freeing all VRAM.
-- **Fast Audio Extraction**: Streams audio directly via FFmpeg (`/Audio/{id}/stream`), extracting a 16 kHz mono WAV without downloading multi-gigabyte video files.
+- **Audio Language Auto-Detection**: Dynamically detects the spoken audio language per movie/episode with Whisper. Never decodes phonetics into the wrong language.
+- **100% Local Neural Translation**: Integrated Meta NLLB-200 (`nllb-200-distilled-600M-ct2-int8`) translates English subtitles into natural Romanian (and 200 other languages) in ~3 seconds on GPU without cloud APIs or recurring costs.
+- **Single Extraction Pipeline**: Streams audio from Jellyfin once, transcribes native speech, and derives all target subtitle tracks locally.
 - **Whisper Subtitle Distinguishing**: Uploads subtitles tagged as `whisper - <Language>` (e.g., `whisper - English - SUBRIP - External`). In the Jellyfin player dropdown, Whisper tracks are clearly separated from embedded subtitles and third-party downloaded subtitles.
-- **Intro Visual Badge**: Prepends an opening watermark (`[Subtitles: Whisper AI]`) during the first 3 seconds of the video, before dialogue starts.
-- **Multi-Language Support**: Configurable comma-separated language queue (e.g. `eng,rum`). Transcribes native speech and translates to English automatically.
+- **Intro Visual Badge**: Prepends an opening watermark (`[Subtitles: Whisper AI]` or `[Subtitrări: Whisper AI]`) during the first 3 seconds of the video, before dialogue starts.
+- **Multi-Language Support**: Configurable comma-separated language queue (e.g. `eng,ron`). Both native transcripts and translated tracks are uploaded automatically.
 - **State Persistence**: Records completed items in an atomic `processed_state.json` tracker so titles are never needlessly re-transcribed across daemon restarts.
 - **24/7 Daemon Operation**: Runs continuously in the background until manually stopped (`Ctrl+C`).
 - **Auto CUDA DLL Discovery**: Automatically detects CUDA 12 runtime DLLs from Ollama (`%LOCALAPPDATA%\Programs\Ollama\lib\ollama\cuda_v12`) or official CUDA installations on Windows.

@@ -34,8 +34,10 @@ IDLE_THRESHOLD_SECONDS: int = int(os.getenv("IDLE_THRESHOLD_SECONDS", "600"))
 WHISPER_MODEL: str = os.getenv("WHISPER_MODEL", "medium")
 COMPUTE_TYPE: str = os.getenv("COMPUTE_TYPE", "float16")
 SUBTITLE_LANGS: list[str] = [
-    s.strip() for s in os.getenv("SUBTITLE_LANGS", "eng").split(",") if s.strip()
+    s.strip() for s in os.getenv("SUBTITLE_LANGS", "eng,ron").split(",") if s.strip()
 ]
+AUTO_DETECT_LANGUAGE: bool = os.getenv("AUTO_DETECT_LANGUAGE", "true").lower() in ("true", "1", "yes")
+TRANSLATION_MODEL: str = os.getenv("TRANSLATION_MODEL", "mijuanlo/nllb-200-distilled-600M-ct2-int8")
 
 # Validate
 _VALID_MODELS = {"tiny", "base", "small", "medium", "large-v2", "large-v3"}
@@ -65,6 +67,8 @@ def summary() -> str:
         f"  Idle Threshold     : {IDLE_THRESHOLD_SECONDS}s\n"
         f"  Whisper Model      : {WHISPER_MODEL}\n"
         f"  Compute Type       : {COMPUTE_TYPE}\n"
-        f"  Subtitle Languages : {', '.join(SUBTITLE_LANGS)}"
+        f"  Subtitle Languages : {', '.join(SUBTITLE_LANGS)}\n"
+        f"  Auto-Detect Audio  : {AUTO_DETECT_LANGUAGE}\n"
+        f"  Translation Model  : {TRANSLATION_MODEL}"
     )
 

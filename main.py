@@ -11,6 +11,7 @@ import argparse
 import gc
 import logging
 import logging.handlers
+import os
 import sys
 import time
 from pathlib import Path
@@ -19,6 +20,7 @@ import config
 import idle_monitor
 import jellyfin_client
 import transcriber
+import translator
 
 # ── Logging Setup ────────────────────────────────────────────────────────────
 
@@ -109,11 +111,11 @@ def load_model():
 
 
 def unload_model(model):
-    """Explicitly free the model and reclaim VRAM."""
-    if model is None:
-        return
-    logger.info("Unloading Whisper model and freeing VRAM...")
-    del model
+    """Explicitly free Whisper and translator models and reclaim all VRAM."""
+    if model is not None:
+        logger.info("Unloading Whisper model and freeing VRAM...")
+        del model
+    translator.unload_translator()
     gc.collect()
     try:
         import torch
@@ -247,16 +249,6 @@ def run_daemon(once: bool = False, ignore_idle: bool = False, target_item_id: st
                 continue
 
             # ── Phase 4: Process items ───────────────────────────────────────
-            _LANG_MAP = {
-                "eng": "en", "rum": "ro", "ron": "ro", "spa": "es", "fra": "fr",
-                "fre": "fr", "deu": "de", "ger": "de", "ita": "it", "por": "pt",
-                "jpn": "ja", "kor": "ko", "zho": "zh", "chi": "zh", "ara": "ar",
-                "hin": "hi", "rus": "ru", "pol": "pl", "nld": "nl", "dut": "nl",
-                "tur": "tr", "hun": "hu", "ces": "cs", "cze": "cs", "swe": "sv",
-                "dan": "da", "fin": "fi", "nor": "no", "ukr": "uk", "bul": "bg",
-                "hrv": "hr", "srp": "sr", "slk": "sk", "slo": "sk",
-            }
-
             aborted = False
             for item in items:
                 item_id = item["Id"]
@@ -271,88 +263,174 @@ def run_daemon(once: bool = False, ignore_idle: bool = False, target_item_id: st
                     break
 
                 stream_url = jellyfin_client.get_audio_stream_url(item_id)
-                any_success = False
+                target_langs = [
+                    jellyfin_client.normalize_to_3letter(l)
+                    for l in item.get("_missing_languages", config.SUBTITLE_LANGS)
+                ]
+                logger.info("  Target subtitle tracks needed: %s", target_langs)
+
+                import tempfile
+                tmp_dir = Path(__file__).parent
+                fd, wav_path = tempfile.mkstemp(suffix=".wav", dir=tmp_dir)
+                os.close(fd)
+
                 successful_langs: list[str] = []
-                target_langs = item.get("_missing_languages", config.SUBTITLE_LANGS)
+                generated_srts: dict[str, str] = {}
 
-                for lang_code in target_langs:
-                    short = _LANG_MAP.get(lang_code, lang_code)
+                try:
+                    # Stage 1: Single Audio Extraction
+                    logger.info("  [1/3] Extracting audio for %s...", display)
+                    if not transcriber.extract_audio(stream_url, wav_path, check_idle=not ignore_idle):
+                        if not ignore_idle and idle_monitor.get_idle_duration_seconds() < 10:
+                            logger.warning("Audio extraction aborted due to user activity")
+                            aborted = True
+                            break
+                        logger.error("Failed to extract audio for %s", display)
+                        continue
 
-                    # "eng" = translate to English; anything else = transcribe natively
-                    if lang_code == "eng":
-                        task = "translate"
-                        whisper_lang = None  # auto-detect source language
-                    else:
-                        task = "transcribe"
-                        whisper_lang = short  # force transcription in this language
-
-                    logger.info("  → Generating %s subtitle (task=%s, lang=%s)",
-                                lang_code, task, whisper_lang or "auto")
-
-                    result = transcriber.process_item(
-                        stream_url, model, language=whisper_lang, task=task,
-                        check_idle=not ignore_idle,
+                    # Stage 2: Whisper Native Transcription with Auto-Detection
+                    logger.info("  [2/3] Transcribing audio with Whisper (auto-detecting language)...")
+                    native_res = transcriber.transcribe(
+                        wav_path, model, language=None, task="transcribe", check_idle=not ignore_idle
                     )
 
-                    if result.aborted:
+                    if native_res.aborted:
                         logger.warning("Transcription aborted for %s — user active", display)
                         aborted = True
                         break
 
-                    if not result.success:
-                        logger.error("Transcription failed for %s (%s): %s",
-                                     display, lang_code, result.error)
+                    if not native_res.success:
+                        logger.error("Transcription failed for %s: %s", display, native_res.error)
                         continue
 
-                    if not result.srt_text:
-                        logger.info("No speech for %s (%s) — skipping this track",
-                                    display, lang_code)
-                        continue
-
-                    # Upload this language's subtitle track
-                    try:
-                        jellyfin_client.upload_subtitle(
-                            item_id, result.srt_text, language=lang_code,
+                    if not native_res.srt_text:
+                        logger.info("No speech detected for %s — skipping item", display)
+                        jellyfin_client.mark_processed(
+                            item_id=item_id, status="skipped", name=display, item_type=item_type,
+                            detail="No speech detected (instrumental or silent)",
                         )
-                        logger.info("Uploaded %s subtitle for %s (%d segments)",
-                                    lang_code, display, result.segment_count)
-                        any_success = True
-                        successful_langs.append(lang_code)
+                        continue
 
-                        # Update state immediately so partial work is preserved
+                    detected_short = native_res.detected_language or "en"
+                    detected_3 = jellyfin_client.normalize_to_3letter(detected_short)
+                    logger.info("  Detected audio language: '%s' (%s) [confidence %.2f]",
+                                detected_short, detected_3, native_res.language_probability)
+
+                    # Store native transcript
+                    generated_srts[detected_3] = native_res.srt_text
+
+                    # If the native language is one of the desired tracks, upload it directly
+                    if detected_3 in target_langs:
+                        try:
+                            jellyfin_client.upload_subtitle(item_id, native_res.srt_text, language=detected_3)
+                            logger.info("  Uploaded native %s subtitle for %s (%d segments)",
+                                        detected_3, display, native_res.segment_count)
+                            successful_langs.append(detected_3)
+                            jellyfin_client.mark_processed(
+                                item_id=item_id,
+                                status="in_progress",
+                                name=display,
+                                item_type=item_type,
+                                completed_langs=[detected_3],
+                                detail=f"Native {detected_3}: {native_res.segment_count} segments",
+                            )
+                        except Exception as exc:
+                            logger.error("Upload failed for %s (%s): %s", display, detected_3, exc)
+
+                    # Stage 3: Generate English track if needed and audio wasn't English
+                    if "eng" in target_langs and "eng" not in generated_srts:
+                        logger.info("  Generating Whisper English translation track...")
+                        eng_res = transcriber.transcribe(
+                            wav_path, model, language=detected_short, task="translate", check_idle=not ignore_idle
+                        )
+                        if eng_res.aborted:
+                            logger.warning("English translation aborted for %s — user active", display)
+                            aborted = True
+                            break
+                        if eng_res.success and eng_res.srt_text:
+                            generated_srts["eng"] = eng_res.srt_text
+                            try:
+                                jellyfin_client.upload_subtitle(item_id, eng_res.srt_text, language="eng")
+                                logger.info("  Uploaded Whisper English subtitle for %s (%d segments)",
+                                            display, eng_res.segment_count)
+                                successful_langs.append("eng")
+                                jellyfin_client.mark_processed(
+                                    item_id=item_id,
+                                    status="in_progress",
+                                    name=display,
+                                    item_type=item_type,
+                                    completed_langs=["eng"],
+                                    detail=f"Whisper English: {eng_res.segment_count} segments",
+                                )
+                            except Exception as exc:
+                                logger.error("Upload failed for %s (eng): %s", display, exc)
+
+                    if aborted:
+                        break
+
+                    # Stage 4: Translate to Romanian and other target languages locally via NLLB-200
+                    base_srt_lang = "eng" if "eng" in generated_srts else detected_3
+                    base_srt = generated_srts.get(base_srt_lang)
+
+                    for tgt in target_langs:
+                        if tgt in successful_langs:
+                            continue  # already uploaded
+
+                        if base_srt:
+                            logger.info("  [3/3] Translating subtitle (%s -> %s) locally using NLLB-200...",
+                                        base_srt_lang, tgt)
+                            trans_res = translator.translate_srt(
+                                base_srt, src_lang=base_srt_lang, tgt_lang=tgt, check_idle=not ignore_idle
+                            )
+                            if trans_res.aborted:
+                                logger.warning("Translation aborted for %s (%s) — user active", display, tgt)
+                                aborted = True
+                                break
+                            if trans_res.success and trans_res.srt_text:
+                                generated_srts[tgt] = trans_res.srt_text
+                                try:
+                                    jellyfin_client.upload_subtitle(item_id, trans_res.srt_text, language=tgt)
+                                    logger.info("  Uploaded translated %s subtitle for %s (%d blocks)",
+                                                tgt, display, trans_res.line_count)
+                                    successful_langs.append(tgt)
+                                    jellyfin_client.mark_processed(
+                                        item_id=item_id,
+                                        status="in_progress",
+                                        name=display,
+                                        item_type=item_type,
+                                        completed_langs=[tgt],
+                                        detail=f"NLLB {tgt}: {trans_res.line_count} blocks",
+                                    )
+                                except Exception as exc:
+                                    logger.error("Upload failed for %s (%s): %s", display, tgt, exc)
+
+                    if aborted:
+                        break
+
+                    # Check overall completion
+                    pending_still = jellyfin_client.get_item_pending_languages(item_id)
+                    if not pending_still:
                         jellyfin_client.mark_processed(
                             item_id=item_id,
-                            status="in_progress",
+                            status="success",
                             name=display,
                             item_type=item_type,
-                            completed_langs=[lang_code],
-                            detail=f"{lang_code}: {result.segment_count} segments",
+                            detail=f"All {len(config.SUBTITLE_LANGS)} tracks complete",
                         )
-                    except Exception as exc:
-                        logger.error("Upload failed for %s (%s): %s",
-                                     display, lang_code, exc)
+                    elif not successful_langs:
+                        jellyfin_client.mark_processed(
+                            item_id=item_id,
+                            status="failed",
+                            name=display,
+                            item_type=item_type,
+                            detail="Failed to generate any target subtitle tracks",
+                        )
+
+                finally:
+                    transcriber._safe_delete(wav_path)
 
                 if aborted:
                     break
-
-                # Mark overall item status
-                pending_still = jellyfin_client.get_item_pending_languages(item_id)
-                if not pending_still:
-                    jellyfin_client.mark_processed(
-                        item_id=item_id,
-                        status="success",
-                        name=display,
-                        item_type=item_type,
-                        detail=f"All {len(config.SUBTITLE_LANGS)} tracks complete",
-                    )
-                elif not any_success:
-                    jellyfin_client.mark_processed(
-                        item_id=item_id,
-                        status="skipped",
-                        name=display,
-                        item_type=item_type,
-                        detail="No speech detected or all tracks failed",
-                    )
 
             # ── Phase 5: Unload model ────────────────────────────────────────
             unload_model(model)

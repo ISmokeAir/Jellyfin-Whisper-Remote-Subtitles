@@ -65,6 +65,8 @@ class TranscriptionResult:
     aborted: bool = False
     error: str = ""
     segment_count: int = 0
+    detected_language: str = ""
+    language_probability: float = 0.0
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -245,12 +247,20 @@ def transcribe(audio_path: str, model: object,
 
     if not collected:
         logger.warning("No speech segments detected — file may be instrumental or silent")
-        return TranscriptionResult(success=True, srt_text="", segment_count=0)
+        return TranscriptionResult(
+            success=True, srt_text="", segment_count=0,
+            detected_language=info.language,
+            language_probability=info.language_probability,
+        )
 
     srt_text = _segments_to_srt(collected)
-    logger.info("Transcription complete: %d segments", len(collected))
-    return TranscriptionResult(success=True, srt_text=srt_text,
-                               segment_count=len(collected))
+    logger.info("Transcription complete: %d segments (language=%s)", len(collected), info.language)
+    return TranscriptionResult(
+        success=True, srt_text=srt_text,
+        segment_count=len(collected),
+        detected_language=info.language,
+        language_probability=info.language_probability,
+    )
 
 
 # ── Full Pipeline ────────────────────────────────────────────────────────────

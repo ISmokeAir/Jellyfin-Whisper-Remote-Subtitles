@@ -213,6 +213,8 @@ def transcribe(audio_path: str, model: object,
             task=task,
             vad_filter=True,
             vad_parameters={"min_silence_duration_ms": 500},
+            condition_on_previous_text=False,
+            repetition_penalty=1.1,
         )
         logger.info("Detected language: %s (prob %.2f)", info.language, info.language_probability)
     except Exception as exc:

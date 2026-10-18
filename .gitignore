@@ -1,0 +1,36 @@
+# Environment & credentials
+.env
+*.env
+*.env.local
+
+# Local application state & logs
+processed_state.json
+processed_state.tmp
+logs/
+*.log
+
+# Audio & temporary artifacts
+*.wav
+*.tmp
+tmp*
+
+# Python build & bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# IDE & OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+

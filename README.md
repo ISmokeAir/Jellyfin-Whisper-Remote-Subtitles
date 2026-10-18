@@ -1,6 +1,6 @@
 # Jellyfin Whisper Worker
 
-> **Automated, distributed subtitle generation daemon for Jellyfin media servers using OpenAI Whisper (`faster-whisper`) and local NVIDIA GPUs.**
+Background subtitle generation daemon for Jellyfin media servers using faster-whisper and Meta NLLB-200 on local NVIDIA GPUs.
 
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
@@ -11,118 +11,172 @@
 
 ## Overview
 
-**Jellyfin Whisper Worker** is a lightweight, background daemon designed to transcribe and translate your entire Jellyfin library using a desktop or gaming laptop GPU (such as an NVIDIA RTX 2060 6GB) without overloading your primary server.
+Jellyfin Whisper Worker offloads speech-to-text and subtitle translation from your primary Jellyfin server to a local network workstation or gaming PC equipped with an NVIDIA GPU.
 
-Instead of running slow CPU transcription on your Jellyfin server, this worker runs on any machine on your local network. It senses when you are idle (no keyboard/mouse input and GPU free), pulls audio streams from Jellyfin at >300x real-time speed, generates high-accuracy `.srt` subtitles using `faster-whisper` (`large-v3`), and uploads them straight back to Jellyfin via its REST API.
+The daemon monitors system idle state and GPU utilization. When the host machine is inactive, it extracts audio streams over HTTP from Jellyfin, performs speech recognition using `faster-whisper`, translates text using a local Meta NLLB-200 model, and uploads the resulting `.srt` subtitle tracks back to the server via the Jellyfin REST API.
 
-If you touch your mouse or start gaming, the worker **aborts within seconds** and releases all VRAM immediately.
+If user interaction (mouse movement or keystrokes) is detected during processing, the daemon aborts execution within seconds, purges temporary files, and frees all GPU VRAM.
 
 ```
        ┌────────────────────────┐
        │     Jellyfin Server    │
-       │  (192.168.x.x:8096)    │
+       │  (http://host:8096)    │
        └────┬──────────────▲────┘
             │              │
- Audio Stream (300x)    Upload Subtitle (.srt)
- /Audio/{id}/stream     POST /Videos/{id}/Subtitles
+  HTTP Audio Stream        Upload Subtitle (.srt)
+  /Audio/{id}/stream       POST /Videos/{id}/Subtitles
             │              │
        ┌────▼──────────────┴────┐
        │ Jellyfin Whisper Worker│
-       │ (RTX 2060 / Idle Laptop│
+       │ (NVIDIA GPU / CUDA 12) │
+       │                        │
+       │ 1. faster-whisper      │
+       │    (large-v3, INT8)    │
+       │ 2. Meta NLLB-200       │
+       │    (Seq2Seq MT, INT8)  │
        └────────────────────────┘
 ```
 
 ---
 
-## Key Features
+## Architecture & Pipeline
 
-- **True Idle-Sensing**: Monitors Win32 user input (`GetLastInputInfo`) and GPU utilization (`nvidia-smi`). Only works when you aren't using the PC.
-- **Instant Abort & VRAM Cleanup**: If you move your mouse or launch a game, extraction and transcription abort within seconds, deleting temp files and freeing all VRAM.
-- **Audio Language Auto-Detection**: Dynamically detects the spoken audio language per movie/episode with Whisper. Never decodes phonetics into the wrong language.
-- **100% Local Neural Translation**: Integrated Meta NLLB-200 (`nllb-200-distilled-600M-ct2-int8`) translates English subtitles into natural Romanian (and 200 other languages) in ~3 seconds on GPU without cloud APIs or recurring costs.
-- **Single Extraction Pipeline**: Streams audio from Jellyfin once, transcribes native speech, and derives all target subtitle tracks locally.
-- **Whisper Subtitle Distinguishing**: Uploads subtitles tagged as `whisper - <Language>` (e.g., `whisper - English - SUBRIP - External`). In the Jellyfin player dropdown, Whisper tracks are clearly separated from embedded subtitles and third-party downloaded subtitles.
-- **Intro Visual Badge**: Prepends an opening watermark (`[Subtitles: Whisper AI]` or `[Subtitrări: Whisper AI]`) during the first 3 seconds of the video, before dialogue starts.
-- **Multi-Language Support**: Configurable comma-separated language queue (e.g. `eng,ron`). Both native transcripts and translated tracks are uploaded automatically.
-- **State Persistence**: Records completed items in an atomic `processed_state.json` tracker so titles are never needlessly re-transcribed across daemon restarts.
-- **24/7 Daemon Operation**: Runs continuously in the background until manually stopped (`Ctrl+C`).
-- **Auto CUDA DLL Discovery**: Automatically detects CUDA 12 runtime DLLs from Ollama (`%LOCALAPPDATA%\Programs\Ollama\lib\ollama\cuda_v12`) or official CUDA installations on Windows.
+1. **Idle and Activity Detection**
+   - Windows: Win32 API (`GetLastInputInfo`) monitors elapsed time since last physical keyboard/mouse input.
+   - GPU utilization is polled via `pynvml` or `nvidia-smi`.
+   - The daemon initiates jobs only when idle duration exceeds `IDLE_THRESHOLD_SECONDS` and GPU load is under 15%.
+   - Active user input immediately terminates active child processes and model inference loops.
+
+2. **Direct Stream Audio Extraction**
+   - FFmpeg connects directly to Jellyfin's `/Audio/{id}/stream` endpoint using API token authentication.
+   - Extracts a single-channel 16 kHz 16-bit PCM WAV without downloading full video containers.
+
+3. **Speech Recognition & Auto-Detection**
+   - Inference runs via `faster-whisper` (`CTranslate2` backend).
+   - Audio language is detected automatically from the first 30 seconds of audio (`task="transcribe", language=None`).
+   - Silences are filtered via Silero VAD (`vad_filter=True`).
+   - Anti-hallucination controls: `condition_on_previous_text=False`, `repetition_penalty=1.1`.
+   - If the audio is non-English, Whisper optionally generates an English translation track (`task="translate"`).
+
+4. **Local Neural Translation (Meta NLLB-200)**
+   - Target languages not covered by native transcription (such as Romanian `ron`) are translated using Meta's `nllb-200-distilled-600M` model running in INT8 via CTranslate2.
+   - Subtitle blocks are parsed, batched, and translated with preserved timestamps.
+   - The opening watermark badge is localized automatically (e.g., `[Subtitrări: Whisper AI]`).
+   - Operates 100% offline with zero external API dependencies.
+
+5. **Subtitle Ingestion & Track Labeling**
+   - Subtitles are base64-encoded and uploaded to Jellyfin at `/Videos/{id}/Subtitles`.
+   - The language field is tagged as `<lang>.whisper` (e.g., `eng.whisper`, `ron.whisper`).
+   - Jellyfin renders these tracks as `whisper - English` and `whisper - Romanian` in client players, allowing users to distinguish AI-generated subtitles from external web downloads or embedded container tracks.
+
+6. **State Tracking & VRAM Reclamation**
+   - State is stored atomically in `processed_state.json`.
+   - Completed titles and languages are recorded so files are not re-processed across restarts.
+   - Whisper and NLLB models are explicitly deleted, triggering garbage collection and CUDA cache clearance when transitioning back to idle or active states.
 
 ---
 
-## Hardware & System Requirements
+## Hardware Requirements
 
-- **Operating System**: Windows 10/11 (fully supported with Win32 idle monitoring) or Linux.
-- **GPU**: NVIDIA GPU with at least 6 GB VRAM (e.g. RTX 2060, RTX 3060, RTX 4060).
-  - 6 GB VRAM: Use `WHISPER_MODEL=large-v3` with `COMPUTE_TYPE=int8` (consumes ~3.2–4.5 GB VRAM).
-  - ≥8 GB VRAM: Use `COMPUTE_TYPE=float16`.
-- **FFmpeg**: Automatically detected if installed on `PATH`, in Jellyfin Server directory (`C:\Program Files\Jellyfin\Server\ffmpeg.exe`), or custom path specified in `FFMPEG_PATH`.
-- **Python**: Python 3.10 to 3.14.
+| Component | Minimum Specification | Recommended Specification |
+| :--- | :--- | :--- |
+| **GPU** | NVIDIA GPU with 6 GB VRAM (e.g., GTX 1660 Ti, RTX 2060) | NVIDIA GPU with $\ge$8 GB VRAM (e.g., RTX 3060, RTX 4060) |
+| **Compute Configuration** | `WHISPER_MODEL=large-v3`, `COMPUTE_TYPE=int8` (~3.5 GB VRAM) | `WHISPER_MODEL=large-v3`, `COMPUTE_TYPE=float16` (~5.5 GB VRAM) |
+| **RAM** | 8 GB System RAM | 16 GB System RAM |
+| **OS** | Windows 10/11 (x64) or Linux (x64) | Windows 11 (x64) |
+| **Python** | Python 3.10 - 3.14 (64-bit) | Python 3.11 - 3.14 (64-bit) |
+| **FFmpeg** | FFmpeg 5.x, 6.x, or 7.x | Installed on `PATH` or bundled with Jellyfin Server |
 
 ---
 
 ## Installation
 
-### 1. Clone the Repository
+### 1. Clone Repository
 
 ```bash
 git clone https://github.com/ISmokeAir/Jellyfin-Whisper-Remote-Subtitles.git
 cd Jellyfin-Whisper-Remote-Subtitles
 ```
 
-### 2. Install Python Dependencies
+### 2. Install Dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-*(Optional: If `torch` or `ctranslate2` cannot find `cublas64_12.dll`, ensure Ollama or CUDA Toolkit 12 is installed).*
+### 3. CUDA 12 Runtime Setup (Windows)
 
-### 3. Configure `.env`
+The worker automatically detects CUDA 12 runtime DLLs (`cublas64_12.dll`) from standard locations, including:
+- Local Ollama installations (`%LOCALAPPDATA%\Programs\Ollama\lib\ollama\cuda_v12`)
+- NVIDIA CUDA Toolkit (`%ProgramFiles%\NVIDIA GPU Computing Toolkit\CUDA\v12.x\bin`)
 
-Copy the template configuration file:
+If CUDA DLLs are located in a custom path, add the directory to your system `PATH`.
+
+### 4. Configuration
+
+Copy the example environment configuration:
 
 ```bash
 copy .env.example .env
 ```
 
-Edit `.env` with your Jellyfin server details:
+Configure the following variables in `.env`:
 
 ```ini
 # Jellyfin Server URL
 JELLYFIN_URL=http://192.168.1.100:8096
 
-# Jellyfin API Key (generate under Dashboard -> API Keys)
-JELLYFIN_API_KEY=your_jellyfin_api_key_here
+# Jellyfin API Key (Dashboard -> API Keys)
+JELLYFIN_API_KEY=your_api_key_here
 
-# Idle detection threshold in seconds (default: 600s = 10 minutes)
+# Idle threshold before worker starts (in seconds)
 IDLE_THRESHOLD_SECONDS=600
 
 # Whisper model size (tiny, base, small, medium, large-v2, large-v3)
 WHISPER_MODEL=large-v3
 
-# Quantization (int8 for 6GB GPUs like RTX 2060, float16 for >=8GB GPUs)
+# Quantization type (int8 for 6GB GPUs, float16 for >=8GB GPUs)
 COMPUTE_TYPE=int8
 
 # Target subtitle languages (comma-separated ISO 639-2 codes)
-# eng = translate to English
-# rum/ron, spa, fra, deu, etc. = native language transcription
-SUBTITLE_LANGS=eng,rum
+SUBTITLE_LANGS=eng,ron
+
+# Enable dynamic audio language auto-detection
+AUTO_DETECT_LANGUAGE=true
+
+# Local Hugging Face repository for NLLB translation
+TRANSLATION_MODEL=mijuanlo/nllb-200-distilled-600M-ct2-int8
 ```
+
+---
+
+## Configuration Reference
+
+| Parameter | Type | Default | Description |
+| :--- | :---: | :---: | :--- |
+| `JELLYFIN_URL` | String | *(Required)* | Base URL of the Jellyfin server including protocol and port. |
+| `JELLYFIN_API_KEY` | String | *(Required)* | Authentication token generated in the Jellyfin Dashboard. |
+| `IDLE_THRESHOLD_SECONDS` | Integer | `600` | Inactivity duration required before background processing begins. |
+| `WHISPER_MODEL` | String | `large-v3` | Model identifier (`tiny`, `base`, `small`, `medium`, `large-v2`, `large-v3`). |
+| `COMPUTE_TYPE` | String | `int8` | Quantization precision (`int8`, `int8_float16`, `float16`, `float32`). |
+| `SUBTITLE_LANGS` | String | `eng,ron` | Desired subtitle tracks per media item. Supports ISO 639-1 and 639-2 codes. |
+| `AUTO_DETECT_LANGUAGE` | Boolean | `true` | Automatically detect spoken language per title instead of forcing a fixed language. |
+| `TRANSLATION_MODEL` | String | `mijuanlo/...` | Hugging Face model repository for CTranslate2 INT8 NLLB-200. |
 
 ---
 
 ## Usage
 
-### 1. Check Library & Queue Status (`--status` / `--dry-run`)
+### 1. Library & Status Overview
 
-Test your connection, inspect idle/GPU status, and view what has been processed vs queued next:
+Inspect server connection, idle status, and queue progress:
 
 ```bash
 python main.py --dry-run
 ```
 
-Output:
+Example output:
+
 ```text
 =================================================================
   Jellyfin Whisper Worker - Status & Queue Overview
@@ -134,77 +188,84 @@ Configuration:
   Idle Threshold     : 600s
   Whisper Model      : large-v3
   Compute Type       : int8
-  Subtitle Languages : eng, rum
+  Subtitle Languages : eng, ron
+  Auto-Detect Audio  : True
+  Translation Model  : mijuanlo/nllb-200-distilled-600M-ct2-int8
 
 System Status:
-  Idle Duration      : 340s (Threshold: 600s)
-  GPU Utilization    : 4%
+  Idle Duration      : 420s (Threshold: 600s)
+  GPU Utilization    : 2%
   Ready for Work     : No (Waiting for user idle & free GPU)
 
 Checking Jellyfin library and queue progress...
 
 Library Overview (845 total media titles):
-  [OK] Completed by Whisper : 1 (0.1%)
-  [...] Pending in Queue    : 844
+  [OK] Completed by Whisper : 2 (0.2%)
+  [...] Pending in Queue    : 843
+
+Completed by Whisper:
+  * Over the Garden Wall S01E01 - The Old Grist Mill [eng,ron] (2026-10-18T22:33:45)
+  * Grey's Anatomy S01E01 - A Hard Day's Night [eng,ron] (2026-10-18T22:49:58)
 
 Next Up in Queue:
-   1. Grey's Anatomy S01E01 - A Hard Day's Night
-      Needs Whisper tracks: eng, rum  [ID: 0a80da7374cb28df97478ae21e3bcda0]
+   1. My Babysitter's a Vampire S01E01 - Lawn of the Dead
+      Needs Whisper tracks: eng, ron  [ID: 7311d35aba6ee6110d11674fe34e4a90]
    2. Scrubs S01E01 - My First Day
-      Needs Whisper tracks: eng, rum  [ID: 388e73b250e3b29ffc06c1ea4d70f223]
+      Needs Whisper tracks: eng, ron  [ID: 388e73b250e3b29ffc06c1ea4d70f223]
 ```
 
----
+### 2. Run the Background Daemon
 
-### 2. Run the 24/7 Daemon
-
-Double-click `start.bat` on Windows, or run from terminal:
+Launch the daemon in the foreground or via startup script:
 
 ```bash
+# Windows batch launcher
+start.bat
+
+# Standard CLI invocation
 python main.py
 ```
 
 The daemon will:
-1. Wait until user input has been idle for `IDLE_THRESHOLD_SECONDS` and GPU load is < 15%.
-2. Fetch a batch of media items needing Whisper subtitles.
-3. Lazily load the Whisper model into VRAM.
-4. Transcribe each item segment by segment.
-5. If you touch the keyboard or mouse, abort immediately and release all VRAM.
-6. When work completes or when interrupted, sleep and repeat.
+1. Poll system idle duration and GPU load every 30 seconds.
+2. Query Jellyfin for pending titles when idle conditions are met.
+3. Stream audio, transcribe native speech, and translate target tracks.
+4. Upload `.srt` tracks to Jellyfin and update `processed_state.json`.
+5. Release VRAM immediately upon user activity or task completion.
 
----
+### 3. CLI Arguments
 
-### 3. Additional CLI Flags
-
-| Flag | Description |
+| Argument | Description |
 | :--- | :--- |
-| `--dry-run` / `--status` | Show system status, configuration, completed list, and pending queue without downloading media. |
-| `--once` | Process one batch of items and exit cleanly (useful for scheduled tasks or testing). |
-| `--ignore-idle` | Bypass keyboard/mouse and GPU idle checks (forces immediate processing). |
-| `--item-id <ID>` | Process a single specific Jellyfin item by its GUID. |
+| `--dry-run`, `--status` | Display system status, configuration, and queue statistics without processing media. |
+| `--once` | Execute a single batch of items and terminate cleanly upon completion. |
+| `--ignore-idle` | Bypass keyboard, mouse, and GPU idle checks (recommended for testing or dedicated headless servers). |
+| `--item-id <ID>` | Process a single Jellyfin media item directly by its GUID. |
 
-Example (process a single movie immediately):
+Example: Process a specific episode immediately:
+
 ```bash
-python main.py --ignore-idle --item-id 2d4aabc6e22df1870d8979fedbca9261
+python main.py --ignore-idle --item-id 0a80da7374cb28df97478ae21e3bcda0
 ```
 
 ---
 
-## How Subtitles Appear in Jellyfin
+## Client Subtitle Display
 
-When selecting subtitles in the Jellyfin player (Web, Mobile, TV, Desktop):
+Subtitles uploaded by the daemon are distinguished in the Jellyfin audio/subtitle selector:
 
-| Track Type | Display Label in Jellyfin | File Stored on Server |
+| Origin | Player Label | Track File |
 | :--- | :--- | :--- |
-| **Whisper Subtitles** | **`whisper - English - SUBRIP - External`**<br>**`whisper - Romanian - SUBRIP - External`** | `<Title>.eng.whisper.srt`<br>`<Title>.rum.whisper.srt` |
-| **External Web Subtitles** | `English - SUBRIP - External`<br>`Romanian - SUBRIP - External` | `<Title>.en.srt`<br>`<Title>.ro.srt` |
-| **Embedded Container Subs** | `English - Default - SUBRIP`<br>`English SDH - SUBRIP` | Embedded in `.mkv` / `.mp4` |
+| **Whisper Worker (Original)** | `whisper - English - SUBRIP - External` | `<Title>.eng.whisper.srt` |
+| **Whisper Worker (Translated)** | `whisper - Romanian - SUBRIP - External` | `<Title>.ron.whisper.srt` |
+| **Third-Party External Subtitles** | `English - SUBRIP - External` | `<Title>.en.srt` |
+| **Embedded Container Streams** | `English - Default - SUBRIP` | Embedded in MKV/MP4 |
 
 ---
 
-## Testing
+## Verification & Testing
 
-Run the automated test suite:
+Execute the test suite to verify configuration parsing, language normalization, timestamp formatting, and subtitle translation logic:
 
 ```bash
 python -m unittest discover -s tests -v
@@ -215,17 +276,20 @@ python -m unittest discover -s tests -v
 ## Project Structure
 
 ```
-├── .env.example          # Template configuration
-├── .gitignore            # Excludes credentials, state, logs, and temp audio
-├── config.py             # Configuration validation and environment loader
-├── idle_monitor.py       # Win32 user input and nvidia-smi GPU monitor
-├── jellyfin_client.py    # Jellyfin REST API and atomic state tracking
-├── main.py               # Daemon loop, VRAM lifecycle, and CLI entry point
-├── requirements.txt      # Python dependencies
-├── start.bat             # One-click Windows startup script
-├── transcriber.py        # FFmpeg audio extractor + faster-whisper engine
+├── .env.example          # Template environment configuration
+├── .gitignore            # Excludes credentials, logs, state files, and cache
+├── config.py             # Environment configuration validation and loader
+├── idle_monitor.py       # Win32 input monitoring and GPU utilization poller
+├── jellyfin_client.py    # Jellyfin REST API integration and state persistence
+├── LICENSE               # MIT License
+├── main.py               # Daemon loop, lifecycle management, and CLI entry point
+├── README.md             # Project documentation
+├── requirements.txt      # Production dependencies
+├── start.bat             # Windows batch startup script
+├── transcriber.py        # FFmpeg stream extractor and faster-whisper pipeline
+├── translator.py         # Meta NLLB-200 local translation engine
 └── tests/
-    └── test_worker.py    # Unit and integration test suite
+    └── test_worker.py    # Unit and regression test suite
 ```
 
 ---
@@ -233,4 +297,3 @@ python -m unittest discover -s tests -v
 ## License
 
 This project is licensed under the [MIT License](LICENSE).
-

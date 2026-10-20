@@ -76,6 +76,19 @@ class TestTranscriber(unittest.TestCase):
         self.assertIsInstance(binary, str)
         self.assertTrue(len(binary) > 0)
 
+    def test_transcribe_multilingual_param_forwarded(self):
+        mock_model = MagicMock()
+        mock_info = MagicMock()
+        mock_info.language = "en"
+        mock_info.language_probability = 0.99
+        mock_model.transcribe.return_value = ([], mock_info)
+
+        # Call transcribe with multilingual=True
+        transcriber.transcribe("dummy.wav", mock_model, multilingual=True, check_idle=False)
+        mock_model.transcribe.assert_called_once()
+        _, kwargs = mock_model.transcribe.call_args
+        self.assertTrue(kwargs.get("multilingual"))
+
 
 class TestJellyfinClient(unittest.TestCase):
     def setUp(self):

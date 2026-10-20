@@ -189,6 +189,7 @@ def extract_audio(stream_url: str, output_path: str, check_idle: bool = True) ->
 def transcribe(audio_path: str, model: object,
                language: str | None = None,
                task: str = "transcribe",
+               multilingual: bool = True,
                check_idle: bool = True) -> TranscriptionResult:
     """
     Transcribe *audio_path* using a pre-loaded faster-whisper model.
@@ -198,6 +199,7 @@ def transcribe(audio_path: str, model: object,
         model: A loaded faster_whisper.WhisperModel instance.
         language: Force source language (e.g. "ro", "en"). None = auto-detect.
         task: "transcribe" for native-language text, "translate" for English translation.
+        multilingual: If True, dynamically re-detect language per segment/scene (e.g. Spanish scenes in English series).
         check_idle: If True, abort when user activity is detected.
 
     Checks for user activity after every segment — if the user touches
@@ -206,13 +208,15 @@ def transcribe(audio_path: str, model: object,
     Returns:
         A TranscriptionResult with the SRT text or abort/error info.
     """
-    logger.info("Starting Whisper %s of %s (language=%s)", task, audio_path, language or "auto")
+    logger.info("Starting Whisper %s of %s (language=%s, multilingual=%s)",
+                task, audio_path, language or "auto", multilingual)
 
     try:
         segments_gen, info = model.transcribe(
             audio_path,
             language=language,
             task=task,
+            multilingual=multilingual,
             vad_filter=True,
             vad_parameters={"min_silence_duration_ms": 500},
             condition_on_previous_text=False,
@@ -268,6 +272,7 @@ def transcribe(audio_path: str, model: object,
 def process_item(stream_url: str, model: object,
                  language: str | None = None,
                  task: str = "transcribe",
+                 multilingual: bool = True,
                  check_idle: bool = True) -> TranscriptionResult:
     """
     End-to-end pipeline: download audio via FFmpeg → transcribe with Whisper.
@@ -285,7 +290,10 @@ def process_item(stream_url: str, model: object,
             return TranscriptionResult(success=False, aborted=True)
 
         # Stage 2: Whisper transcription
-        result = transcribe(wav_path, model, language=language, task=task, check_idle=check_idle)
+        result = transcribe(
+            wav_path, model, language=language, task=task,
+            multilingual=multilingual, check_idle=check_idle,
+        )
         return result
 
     finally:

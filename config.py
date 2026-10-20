@@ -37,6 +37,7 @@ SUBTITLE_LANGS: list[str] = [
     s.strip() for s in os.getenv("SUBTITLE_LANGS", "eng,ron").split(",") if s.strip()
 ]
 AUTO_DETECT_LANGUAGE: bool = os.getenv("AUTO_DETECT_LANGUAGE", "true").lower() in ("true", "1", "yes")
+WHISPER_MULTILINGUAL: bool = os.getenv("WHISPER_MULTILINGUAL", "true").lower() in ("true", "1", "yes")
 DEFAULT_SUBTITLE_LANG: str = os.getenv("DEFAULT_SUBTITLE_LANG", "eng")
 TRANSLATION_MODEL: str = os.getenv("TRANSLATION_MODEL", "mijuanlo/nllb-200-distilled-600M-ct2-int8")
 
@@ -71,6 +72,7 @@ def summary() -> str:
         f"  Subtitle Languages : {', '.join(SUBTITLE_LANGS)}\n"
         f"  Default Subtitle   : {DEFAULT_SUBTITLE_LANG}\n"
         f"  Auto-Detect Audio  : {AUTO_DETECT_LANGUAGE}\n"
+        f"  Multilingual Audio : {WHISPER_MULTILINGUAL}\n"
         f"  Translation Model  : {TRANSLATION_MODEL}"
     )
 

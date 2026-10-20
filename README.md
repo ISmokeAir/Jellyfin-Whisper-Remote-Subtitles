@@ -147,6 +147,9 @@ DEFAULT_SUBTITLE_LANG=eng
 # Enable dynamic audio language auto-detection
 AUTO_DETECT_LANGUAGE=true
 
+# Enable multilingual dynamic re-detection per scene (e.g., Spanish scenes in English series)
+WHISPER_MULTILINGUAL=true
+
 # Local Hugging Face repository for NLLB translation
 TRANSLATION_MODEL=mijuanlo/nllb-200-distilled-600M-ct2-int8
 ```
@@ -165,6 +168,7 @@ TRANSLATION_MODEL=mijuanlo/nllb-200-distilled-600M-ct2-int8
 | `SUBTITLE_LANGS` | String | `eng,ron` | Desired subtitle tracks per media item. Supports ISO 639-1 and 639-2 codes. |
 | `DEFAULT_SUBTITLE_LANG` | String | `eng` | Language to tag as `Default` in Jellyfin, making it auto-select during playback. |
 | `AUTO_DETECT_LANGUAGE` | Boolean | `true` | Automatically detect spoken language per title instead of forcing a fixed language. |
+| `WHISPER_MULTILINGUAL` | Boolean | `true` | Dynamically re-detect language per scene for multilingual media (e.g., Spanish in Jack Ryan). |
 | `TRANSLATION_MODEL` | String | `mijuanlo/...` | Hugging Face model repository for CTranslate2 INT8 NLLB-200. |
 
 ---

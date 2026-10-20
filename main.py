@@ -288,10 +288,12 @@ def run_daemon(once: bool = False, ignore_idle: bool = False, target_item_id: st
                         logger.error("Failed to extract audio for %s", display)
                         continue
 
-                    # Stage 2: Whisper Native Transcription with Auto-Detection
-                    logger.info("  [2/3] Transcribing audio with Whisper (auto-detecting language)...")
+                    # Stage 2: Whisper Native Transcription with Auto-Detection & Multilingual support
+                    logger.info("  [2/3] Transcribing audio with Whisper (auto-detecting language, multilingual=%s)...",
+                                config.WHISPER_MULTILINGUAL)
                     native_res = transcriber.transcribe(
-                        wav_path, model, language=None, task="transcribe", check_idle=not ignore_idle
+                        wav_path, model, language=None, task="transcribe",
+                        multilingual=config.WHISPER_MULTILINGUAL, check_idle=not ignore_idle
                     )
 
                     if native_res.aborted:
@@ -339,9 +341,11 @@ def run_daemon(once: bool = False, ignore_idle: bool = False, target_item_id: st
 
                     # Stage 3: Generate English track if needed and audio wasn't English
                     if "eng" in target_langs and "eng" not in generated_srts:
-                        logger.info("  Generating Whisper English translation track...")
+                        logger.info("  Generating Whisper English translation track (multilingual=%s)...",
+                                    config.WHISPER_MULTILINGUAL)
                         eng_res = transcriber.transcribe(
-                            wav_path, model, language=detected_short, task="translate", check_idle=not ignore_idle
+                            wav_path, model, language=detected_short, task="translate",
+                            multilingual=config.WHISPER_MULTILINGUAL, check_idle=not ignore_idle
                         )
                         if eng_res.aborted:
                             logger.warning("English translation aborted for %s — user active", display)

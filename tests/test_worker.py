@@ -156,9 +156,14 @@ class TestJellyfinClient(unittest.TestCase):
         mock_session.post.assert_called_once()
         args, kwargs = mock_session.post.call_args
         payload = kwargs["json"]
-        # Must tag .whisper in Language so Jellyfin formats it as 'whisper - English'
-        self.assertEqual(payload["Language"], "eng.whisper")
+        # Must tag .whisper.default for default language (eng)
+        self.assertEqual(payload["Language"], "eng.whisper.default")
         self.assertEqual(payload["Format"], "srt")
+
+        # Non-default languages should tag .whisper
+        jellyfin_client.upload_subtitle("test-id", "1\n00:00:01,000 --> 00:00:02,000\nHi\n", language="ron")
+        args2, kwargs2 = mock_session.post.call_args
+        self.assertEqual(kwargs2["json"]["Language"], "ron.whisper")
 
     def test_language_normalization(self):
         self.assertEqual(jellyfin_client.normalize_to_3letter("en"), "eng")

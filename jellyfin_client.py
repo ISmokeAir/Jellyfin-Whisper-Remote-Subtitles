@@ -291,27 +291,42 @@ def get_audio_stream_url(item_id: str) -> str:
     return f"{config.JELLYFIN_URL}/Audio/{item_id}/stream"
 
 
-def upload_subtitle(item_id: str, srt_text: str, language: str | None = None) -> None:
+def upload_subtitle(
+    item_id: str,
+    srt_text: str,
+    language: str | None = None,
+    is_default: bool | None = None,
+) -> None:
     """
     Upload an SRT subtitle to Jellyfin for the given item.
 
     Encodes the SRT text as Base64 and POSTs to /Videos/{item_id}/Subtitles.
-    Using '{lang}.whisper' embeds 'whisper' as the subtitle track title in Jellyfin
-    (e.g., 'whisper - English - SUBRIP - External'), clearly distinguishing it from
+    Using '{lang}.whisper' (or '{lang}.whisper.default') embeds 'whisper' as the subtitle track title in Jellyfin
+    (e.g., 'whisper - English - Default - SUBRIP - External'), clearly distinguishing it from
     any third-party or website-downloaded subtitles.
+    When is_default is True (or matches config.DEFAULT_SUBTITLE_LANG), appending '.default' instructs
+    Jellyfin to set IsDefault=True on the track, making it the primary active track while keeping older
+    subtitles as fallbacks.
     """
     raw_lang = language or (config.SUBTITLE_LANGS[0] if config.SUBTITLE_LANGS else "eng")
     lang = normalize_to_3letter(raw_lang)
+
+    if is_default is None:
+        target_default = normalize_to_3letter(getattr(config, "DEFAULT_SUBTITLE_LANG", "eng"))
+        is_default = (lang == target_default)
+
+    tag = f"{lang}.whisper.default" if is_default else f"{lang}.whisper"
+
     encoded = base64.b64encode(srt_text.encode("utf-8")).decode("ascii")
     url = f"{config.JELLYFIN_URL}/Videos/{item_id}/Subtitles"
     payload = {
-        "Language": f"{lang}.whisper",
+        "Language": tag,
         "Format": "srt",
         "IsForced": False,
         "Data": encoded,
     }
     resp = _SESSION.post(url, json=payload, timeout=60)
     resp.raise_for_status()
-    logger.info("Uploaded subtitle for item %s (lang=%s.whisper)", item_id, lang)
+    logger.info("Uploaded subtitle for item %s (lang=%s, is_default=%s)", item_id, tag, is_default)
 
 

@@ -141,6 +141,9 @@ COMPUTE_TYPE=int8
 # Target subtitle languages (comma-separated ISO 639-2 codes)
 SUBTITLE_LANGS=eng,ron
 
+# Default subtitle track to flag as active/default in player (e.g., eng or ron)
+DEFAULT_SUBTITLE_LANG=eng
+
 # Enable dynamic audio language auto-detection
 AUTO_DETECT_LANGUAGE=true
 
@@ -160,6 +163,7 @@ TRANSLATION_MODEL=mijuanlo/nllb-200-distilled-600M-ct2-int8
 | `WHISPER_MODEL` | String | `large-v3` | Model identifier (`tiny`, `base`, `small`, `medium`, `large-v2`, `large-v3`). |
 | `COMPUTE_TYPE` | String | `int8` | Quantization precision (`int8`, `int8_float16`, `float16`, `float32`). |
 | `SUBTITLE_LANGS` | String | `eng,ron` | Desired subtitle tracks per media item. Supports ISO 639-1 and 639-2 codes. |
+| `DEFAULT_SUBTITLE_LANG` | String | `eng` | Language to tag as `Default` in Jellyfin, making it auto-select during playback. |
 | `AUTO_DETECT_LANGUAGE` | Boolean | `true` | Automatically detect spoken language per title instead of forcing a fixed language. |
 | `TRANSLATION_MODEL` | String | `mijuanlo/...` | Hugging Face model repository for CTranslate2 INT8 NLLB-200. |
 
